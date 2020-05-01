@@ -1,0 +1,114 @@
+version: "3.7"
+services:
+
+  database:
+    image: mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: $SQL_PASS_ROOT
+      MYSQL_DATABASE: backend
+      MYSQL_USER: backend_user
+      MYSQL_PASSWORD: $SQL_PASS_DB
+    volumes:
+      - ./database/schema:/docker-entrypoint-initdb.d
+      - ./database/data:/var/lib/mysql
+
+  frontend:
+    image: registry.gitlab.com/husocial/frontend
+    environment:
+      API: https://$DOMAIN/api
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`$DOMAIN`)"
+      - "traefik.http.routers.frontend.tls.certresolver=default"
+
+  backend:
+    image: registry.gitlab.com/husocial/backend
+    environment:
+      DB_HOST: database
+      DB_USER: backend_user
+      DB_PASS: $SQL_PASS_DB
+      DB_NAME: backend
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`$DOMAIN`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.backend.tls.certresolver=default"
+      - "traefik.http.middlewares.backend-strip-prefix.stripprefix.prefixes=/api"
+      - "traefik.http.routers.backend.middlewares=backend-strip-prefix"
+
+  tacodns-acme:
+    restart: always
+    image: registry.gitlab.com/chris13524/tacodns-acme
+    environment:
+      USERNAME: user
+      PASSWORD: pass
+    networks:
+      - tacodns
+
+  tacodns:
+    restart: always
+    image: registry.gitlab.com/chris13524/tacodns
+    ports:
+      - "167.99.147.33:53:53/udp"
+      - "167.99.147.33:53:53/tcp"
+      - "2604:a880:400:d1::82a:2001:53:53/udp"
+      - "2604:a880:400:d1::82a:2001:53:53/tcp"
+    networks:
+      - tacodns
+    command: --config-env TACODNS --verbose
+    environment:
+      TACODNS: |
+        ttl: 5m
+        zones:
+          "_acme-challenge.**":
+            TRPP: http://tacodns-acme/lookup
+
+          $DOMAIN:
+            A: 167.99.147.33
+
+          "***./ns\\d*/.$DOMAIN":
+            A: 167.99.147.33
+
+          "***":
+            NS: ns.$DOMAIN
+
+  traefik:
+    image: traefik:latest
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - traefik
+      - tacodns
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./acme:/acme
+    command:
+      - "--log.level=DEBUG"
+      - "--providers.docker.exposedByDefault=false"
+      - "--providers.docker.network=husocial_traefik"
+      - "--entrypoints.http.address=:80"
+      - "--entrypoints.https.address=:443"
+      - "--certificatesResolvers.default.acme.storage=/acme/acme.json"
+      - "--certificatesResolvers.default.acme.dnsChallenge.provider=httpreq"
+      - "--certificatesResolvers.default.acme.dnsChallenge.delayBeforeCheck=1"
+      - "--serversTransport.insecureSkipVerify=true"
+    environment:
+      HTTPREQ_ENDPOINT: http://tacodns-acme/set
+      HTTPREQ_USERNAME: user
+      HTTPREQ_PASSWORD: pass
+    labels:
+      # global https redirect
+      - "traefik.enable=true"
+      - "traefik.http.routers.https-redirect.entrypoints=http"
+      - "traefik.http.routers.https-redirect.rule=HostRegexp(`{any:.*}`)"
+      - "traefik.http.routers.https-redirect.middlewares=https-redirect"
+      - "traefik.http.middlewares.https-redirect.redirectScheme.scheme=https"
+
+networks:
+  traefik:
+  tacodns:
